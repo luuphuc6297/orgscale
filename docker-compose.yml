@@ -1,0 +1,51 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: mcm-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: campaign_manager
+    ports:
+      - "5432:5432"
+    volumes:
+      - mcm-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: apps/backend/Dockerfile
+    container_name: mcm-backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/campaign_manager
+      JWT_SECRET: dev-secret-change-me
+      SEND_SUCCESS_RATE: "0.8"
+      CORS_ORIGIN: http://localhost:5173
+    ports:
+      - "4000:4000"
+    command: sh -c "yarn workspace @mcm/backend migrate && yarn workspace @mcm/backend seed && yarn workspace @mcm/backend start"
+
+  frontend:
+    build:
+      context: .
+      dockerfile: apps/frontend/Dockerfile
+      args:
+        VITE_API_BASE_URL: http://localhost:4000
+    container_name: mcm-frontend
+    depends_on:
+      - backend
+    ports:
+      - "5173:80"
+
+volumes:
+  mcm-pg-data:

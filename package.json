@@ -1,0 +1,20 @@
+{
+  "name": "mini-campaign-manager",
+  "private": true,
+  "version": "1.0.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev:backend": "yarn workspace @mcm/backend dev",
+    "dev:frontend": "yarn workspace @mcm/frontend dev",
+    "build:frontend": "yarn workspace @mcm/frontend build",
+    "test:backend": "yarn workspace @mcm/backend test",
+    "migrate": "yarn workspace @mcm/backend migrate",
+    "seed": "yarn workspace @mcm/backend seed"
+  }
+}
