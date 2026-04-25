@@ -1,15 +1,11 @@
-import { Injectable } from '@nestjs/common';
-import { InjectModel } from '@nestjs/sequelize';
 import { Op } from 'sequelize';
 import { Recipient } from './recipient.model';
-import { CreateRecipientDto } from './dto/create-recipient.dto';
-import { ListRecipientsDto } from './dto/list-recipients.dto';
+import type { CreateRecipientInput, ListRecipientsQuery } from './recipients.schemas';
 
-@Injectable()
 export class RecipientsService {
-  constructor(@InjectModel(Recipient) private readonly model: typeof Recipient) {}
+  constructor(private readonly model: typeof Recipient) {}
 
-  async list(params: ListRecipientsDto) {
+  async list(params: ListRecipientsQuery) {
     const { page, limit, search } = params;
     const where = search ? { email: { [Op.iLike]: `%${search}%` } } : {};
     const offset = (page - 1) * limit;
@@ -22,10 +18,10 @@ export class RecipientsService {
     return { data: rows, total: count, page, limit };
   }
 
-  async create(dto: CreateRecipientDto) {
+  async create(input: CreateRecipientInput) {
     const [recipient] = await this.model.findOrCreate({
-      where: { email: dto.email.toLowerCase() },
-      defaults: { email: dto.email.toLowerCase(), name: dto.name ?? null } as any,
+      where: { email: input.email.toLowerCase() },
+      defaults: { email: input.email.toLowerCase(), name: input.name ?? null } as any,
     });
     return recipient;
   }

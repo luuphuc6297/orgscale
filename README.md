@@ -1,5 +1,10 @@
 # Mini Campaign Manager
 
+[![CI](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
+[![CD](https://github.com/OWNER/REPO/actions/workflows/cd.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/cd.yml)
+
+> Replace `OWNER/REPO` in the badges above with your GitHub `org/repo` slug after pushing.
+
 A small full-stack MarTech tool: marketers create email campaigns, schedule or send them immediately, and watch live stats as the (simulated) sender works through the recipient list.
 
 Built for the S5 Tech Full-Stack Code Challenge.
@@ -9,7 +14,7 @@ Built for the S5 Tech Full-Stack Code Challenge.
 | Layer       | Tech                                                                       |
 |-------------|----------------------------------------------------------------------------|
 | Frontend    | Vite + React 18 + TypeScript, TailwindCSS, shadcn/ui primitives, Zustand (auth), TanStack Query (server state), React Router |
-| Backend     | Node 20 + **NestJS 10** (Express adapter), `@nestjs/sequelize` + `sequelize-typescript`, `class-validator`/`class-transformer`, `@nestjs/jwt` + `passport-jwt`, `@nestjs/schedule` (cron) |
+| Backend     | Node 20 + **Express 4 + TypeScript**, `sequelize-typescript`, `zod` (validation + env), `jsonwebtoken` (auth), `node-cron` (scheduler), `pino` (logging), `helmet` + `express-rate-limit` (security) |
 | Database    | PostgreSQL 16 (with `pgcrypto` extension for `gen_random_uuid()`)          |
 | Tests       | Jest + Supertest via `@nestjs/testing` (e2e tests against a real Postgres DB) |
 | Packaging   | Yarn workspaces monorepo, Docker Compose for one-command boot              |
@@ -116,7 +121,7 @@ apps/backend/
 
 ## Architecture decisions
 
-**Why NestJS over plain Express?** The original spec is small enough that Express would work, but NestJS earns its keep here by giving us four things for free that we'd otherwise hand-roll: (a) a DI container so `CampaignsService`, `StatsService`, and `SendSimulator` get the same Sequelize models and `ConfigService` injected without singleton hacks, (b) a global `ValidationPipe` that runs `class-validator` on every DTO without per-route boilerplate, (c) `@nestjs/schedule` so the cron is a decorator on a method instead of a separate `node-cron.start()` lifecycle, and (d) `@nestjs/testing` so `Test.createTestingModule({ imports: [AppModule] })` spins up a real app for e2e tests with one line. The cost is one extra layer of abstraction (modules + decorators) — worth it once you have more than two services that share state.
+**Why plain Express over NestJS?** The spec asks for Node.js + Express, so we ship Express. The previous iteration used NestJS for DI, ValidationPipe, and Schedule — each is replaced by a small, focused pattern here: a **composition root** in `src/app.ts` wires services manually (no DI container, no `reflect-metadata` runtime reliance beyond what `sequelize-typescript` needs), `zod` middleware replaces `class-validator`, and `node-cron` replaces `@nestjs/schedule`. The result is less framework, less magic, and a surface area that matches the spec.
 
 **State machine.** Campaigns move through `draft → scheduled → sending → sent` (or `draft → sending → sent`). Mutations only transition forward; `PATCH`/`DELETE` are rejected with `409 INVALID_STATE_TRANSITION` outside `draft`. Each transition is a single `UPDATE … WHERE status = …` so two concurrent send requests cannot both succeed — the second sees `count = 0` and returns 409.
 
@@ -149,6 +154,60 @@ Coverage includes:
 
 Each spec spins up a real Nest app via `Test.createTestingModule({ imports: [AppModule] })`, applies the production `ValidationPipe` + `AllExceptionsFilter`, and runs against the real Postgres at `TEST_DATABASE_URL` — no mocks at the DB boundary, so a broken migration or model change fails the suite.
 
+## CI/CD
+
+Three GitHub Actions workflows live under `.github/workflows/`.
+
+### `ci.yml` — runs on every PR and push to `main`
+
+Five jobs, fan-out from a shared install step:
+
+| Job | What it does | Why |
+|---|---|---|
+| `lint` | `yarn lint` (ESLint) across all workspaces | Style + simple correctness gates |
+| `typecheck` | `tsc --noEmit` for backend and frontend | Catches type regressions without producing artifacts |
+| `test-backend` | Spins a real `postgres:16-alpine` service, runs migrations, executes Jest e2e suite | Same harness as local — no mocks at the DB boundary |
+| `build` | Builds backend + frontend dist; uploads artifacts (7-day retention) | Verifies the production build is wirable |
+| `ci-success` | Aggregator job that fails if any of the above failed | Single required check on PR branch protection |
+
+Concurrency: `cancel-in-progress: true` on the same ref — pushing a new commit kills the previous run automatically.
+
+### `cd.yml` — runs on pushes to `main` and on `v*.*.*` tags
+
+- **Matrix**: builds and pushes both `mcm-backend` and `mcm-frontend` images in parallel
+- **Registry**: `ghcr.io/<owner>/mcm-{backend,frontend}` (free for public repos; uses `${{ secrets.GITHUB_TOKEN }}` — no setup required)
+- **Tags**: `latest` (on `main`), branch name, PR number, full SemVer (on tag push), short SHA — driven by `docker/metadata-action`
+- **Layer cache**: `cache-from: type=gha` and `cache-to: type=gha,mode=max` — second build of the same Dockerfile typically completes in <60s
+- **Smoke test job**: pulls the freshly-pushed backend image, spins it against a Postgres container, and curls `/health` to verify the runtime image actually starts
+
+To pull the image after a push:
+
+```bash
+docker pull ghcr.io/<owner>/mcm-backend:latest
+docker pull ghcr.io/<owner>/mcm-frontend:latest
+```
+
+### `release.yml` — runs when a `v*.*.*` git tag is pushed
+
+- Generates a changelog by `git log` between the previous tag and the new one
+- Creates a GitHub Release with the changelog + `docker pull` instructions for the matching image tag
+- Marks pre-releases automatically when the tag contains `-` (e.g., `v1.2.0-rc.1`)
+
+To cut a release:
+
+```bash
+git tag v1.0.0 -m "First public release"
+git push origin v1.0.0
+# → cd.yml builds + pushes ghcr.io/<owner>/mcm-{backend,frontend}:1.0.0
+# → release.yml creates the GitHub Release with auto-generated notes
+```
+
+### Notes on configuration
+
+- `.dockerignore` at the repo root keeps `node_modules`, `.git`, `.env`, `docs`, and `coverage` out of the Docker build context — speeds up `cd.yml` significantly
+- The CI test job overrides `RATE_LIMIT_AUTH_MAX` and `RATE_LIMIT_API_MAX` to `'10000'` so test cases can call `/auth/login` and `/campaigns` repeatedly without tripping the rate limiter
+- No deploy step ships in this repo — `cd.yml` produces the artifacts (Docker images on GHCR) and stops there. Plug your own platform (Fly.io, Railway, ECS, K8s) in front of those images.
+
 ## How I used Claude Code
 
 I drove this build with the Superpowers workflow: a brainstorming pass to disambiguate the spec, a single end-to-end implementation plan saved to `docs/superpowers/plans/`, then inline execution task-by-task. Notable points where the agent's discipline mattered:
@@ -158,5 +217,6 @@ I drove this build with the Superpowers workflow: a brainstorming pass to disamb
 * **Live polling:** the agent reached for TanStack Query's conditional `refetchInterval` (returning `false` once status flips) instead of a blanket interval — which means a quiet detail page makes zero network noise.
 * **Idempotent migrations:** the Postgres ENUM types are wrapped in `DO $$ BEGIN IF NOT EXISTS … $$` blocks so re-running the migration during local iteration doesn't blow up.
 * **Framework swap mid-flight:** I shipped the Express version first, then asked the agent to migrate the entire backend to NestJS while keeping the API contract byte-for-byte identical. It scoped out the rewrite as 8 N-tasks (scaffold → models → auth → recipients/campaigns modules → tests → cleanup) and held the frontend constant — the React app needed zero changes.
+* **Framework swap back to Express.** After the initial NestJS implementation shipped, an audit flagged the framework deviation from spec. The agent scoped the rewrite as 9 phases (deps swap → infra → models → modules → bootstrap → tests → CI), used the existing atomic `UPDATE … WHERE status = …` pattern unchanged, and ported all existing e2e tests plus added new coverage for recipients CRUD and DELETE on non-draft. The API contract held byte-for-byte — the React frontend did not need a single line changed beyond two unrelated polish fixes (remove hardcoded demo creds, confirm dialog on Send).
 
 Implementation plan (the full task-by-task playbook) lives in `docs/superpowers/plans/2026-04-24-mini-campaign-manager.md`.

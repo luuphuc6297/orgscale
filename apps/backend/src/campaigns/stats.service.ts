@@ -1,5 +1,3 @@
-import { Injectable } from '@nestjs/common';
-import { InjectConnection } from '@nestjs/sequelize';
 import { QueryTypes, Sequelize } from 'sequelize';
 
 export interface CampaignStats {
@@ -11,13 +9,15 @@ export interface CampaignStats {
   open_rate: number;
 }
 
-@Injectable()
 export class StatsService {
-  constructor(@InjectConnection() private readonly sequelize: Sequelize) {}
+  constructor(private readonly sequelize: Sequelize) {}
 
   async compute(campaignId: string): Promise<CampaignStats> {
     const [row] = await this.sequelize.query<{
-      total: string; sent: string; failed: string; opened: string;
+      total: string;
+      sent: string;
+      failed: string;
+      opened: string;
     }>(
       `SELECT
          COUNT(*)                                       AS total,
@@ -32,7 +32,6 @@ export class StatsService {
     const sent = Number(row?.sent ?? 0);
     const failed = Number(row?.failed ?? 0);
     const opened = Number(row?.opened ?? 0);
-    // Marketing convention: open_rate is conditional on delivery (opened / sent), not opened / total
     const send_rate = total === 0 ? 0 : sent / total;
     const open_rate = sent === 0 ? 0 : opened / sent;
     return { total, sent, failed, opened, send_rate, open_rate };

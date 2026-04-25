@@ -24,16 +24,24 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # Secrets: set via shell `export JWT_SECRET=...` or .env at repo root before `docker compose up`.
+    # Compose auto-loads `.env` (in the same dir as docker-compose.yml) — do NOT commit it.
     environment:
       NODE_ENV: production
       PORT: 4000
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/campaign_manager
-      JWT_SECRET: dev-secret-change-me
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me-only-for-dev-min-16-chars}
       SEND_SUCCESS_RATE: "0.8"
       CORS_ORIGIN: http://localhost:5173
     ports:
       - "4000:4000"
-    command: sh -c "yarn workspace @mcm/backend migrate && yarn workspace @mcm/backend seed && yarn workspace @mcm/backend start"
+    command: sh -c "/app/node_modules/.bin/sequelize-cli db:migrate && (/app/node_modules/.bin/sequelize-cli db:seed:all || true) && node dist/src/main.js"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:4000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   frontend:
     build:
@@ -43,7 +51,8 @@ services:
         VITE_API_BASE_URL: http://localhost:4000
     container_name: mcm-frontend
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     ports:
       - "5173:80"
 

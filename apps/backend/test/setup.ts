@@ -1,33 +1,32 @@
-import { INestApplication, ValidationPipe } from '@nestjs/common';
-import { Test, TestingModule } from '@nestjs/testing';
-import { AppModule } from '../src/app.module';
-import { AllExceptionsFilter } from '../src/common/filters/all-exceptions.filter';
-import { User } from '../src/users/user.model';
-import { Recipient } from '../src/recipients/recipient.model';
-import { Campaign } from '../src/campaigns/campaign.model';
-import { CampaignRecipient } from '../src/campaigns/campaign-recipient.model';
+import 'reflect-metadata';
+import 'dotenv/config';
+import type { Express } from 'express';
+import type { Sequelize } from 'sequelize-typescript';
+import { createApp } from '../src/app';
+import { createLogger } from '../src/logger';
+import { loadEnv, type Env } from '../src/config/env';
 
-// Boot a Nest application identical to production bootstrap (same pipes/filters).
-// Tests run against the real Postgres TEST_DATABASE_URL.
-export async function createTestApp(): Promise<INestApplication> {
-  process.env.NODE_ENV = 'test';
-  const moduleRef: TestingModule = await Test.createTestingModule({
-    imports: [AppModule],
-  }).compile();
-
-  const app = moduleRef.createNestApplication();
-  app.useGlobalPipes(
-    new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }),
-  );
-  app.useGlobalFilters(new AllExceptionsFilter());
-  await app.init();
-  return app;
+export interface TestBundle {
+  app: Express;
+  sequelize: Sequelize;
+  env: Env;
 }
 
-// Truncate all tables in dependency order. Cheaper than dropping/recreating the schema.
-export async function truncateAll(): Promise<void> {
-  await CampaignRecipient.destroy({ where: {}, force: true });
-  await Campaign.destroy({ where: {}, force: true });
-  await Recipient.destroy({ where: {}, force: true });
-  await User.destroy({ where: {}, force: true });
+export async function createTestApp(): Promise<TestBundle> {
+  const env = loadEnv({
+    ...process.env,
+    NODE_ENV: 'test',
+    JWT_SECRET: process.env.JWT_SECRET ?? 'test-secret-for-e2e-only-0123456789',
+    RATE_LIMIT_AUTH_MAX: '1000',
+    RATE_LIMIT_API_MAX: '10000',
+  });
+  const logger = createLogger('silent' as any, false);
+  const { app, sequelize } = await createApp(env, logger);
+  return { app, sequelize, env };
+}
+
+export async function truncateAll(sequelize: Sequelize): Promise<void> {
+  await sequelize.query(
+    'TRUNCATE TABLE campaign_recipients, campaigns, recipients, users RESTART IDENTITY CASCADE;',
+  );
 }

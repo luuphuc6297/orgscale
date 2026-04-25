@@ -1,0 +1,138 @@
+name: CD
+
+# Build + push Docker images to GitHub Container Registry on main branch + tags.
+# Images consumers (e.g., Docker Compose, Kubernetes) can pull:
+#   ghcr.io/<owner>/mcm-backend:latest
+#   ghcr.io/<owner>/mcm-frontend:latest
+#   ghcr.io/<owner>/mcm-backend:v1.2.3   (when a tag is pushed)
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: false  # don't cancel image pushes mid-flight
+
+permissions:
+  contents: read
+  packages: write     # required to push to GHCR
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build-and-push:
+    name: Build & push ${{ matrix.app }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - app: backend
+            context: .
+            dockerfile: apps/backend/Dockerfile
+            image_suffix: backend
+          - app: frontend
+            context: .
+            dockerfile: apps/frontend/Dockerfile
+            image_suffix: frontend
+            build_args: |
+              VITE_API_BASE_URL=http://localhost:4000
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set lowercase image name
+        id: img
+        run: |
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          echo "name=${{ env.REGISTRY }}/${OWNER}/mcm-${{ matrix.image_suffix }}" >> "$GITHUB_OUTPUT"
+
+      - name: Extract image metadata (tags + labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.img.outputs.name }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-,format=short
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: ${{ matrix.build_args }}
+          cache-from: type=gha,scope=${{ matrix.app }}
+          cache-to: type=gha,scope=${{ matrix.app }},mode=max
+          platforms: linux/amd64
+
+      - name: Image digest
+        run: echo "Image digest=${{ steps.img.outputs.name }}@${{ steps.meta.outputs.digest }}"
+
+  smoke-test:
+    name: Smoke test compose stack
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compose up with built images
+        env:
+          OWNER_LC: ${{ github.repository_owner }}
+        run: |
+          # Pull-only test: verify the just-pushed images can be pulled and started.
+          OWNER_LC="${OWNER_LC,,}"
+          docker run -d --name pg \
+            -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres \
+            -e POSTGRES_DB=campaign_manager \
+            -p 5432:5432 postgres:16-alpine
+          for i in {1..30}; do docker exec pg pg_isready -U postgres && break || sleep 2; done
+          docker run -d --name be \
+            --network host \
+            -e DATABASE_URL=postgres://postgres:postgres@localhost:5432/campaign_manager \
+            -e JWT_SECRET=ci-smoke-secret-min-16-characters \
+            -e NODE_ENV=production \
+            -e PORT=4000 \
+            ghcr.io/${OWNER_LC}/mcm-backend:sha-$(git rev-parse --short HEAD) || true
+
+          # If exact sha tag is missing (e.g., manual dispatch), fall back to latest.
+          if ! docker ps | grep -q be; then
+            docker run -d --name be --network host \
+              -e DATABASE_URL=postgres://postgres:postgres@localhost:5432/campaign_manager \
+              -e JWT_SECRET=ci-smoke-secret-min-16-characters \
+              -e NODE_ENV=production -e PORT=4000 \
+              ghcr.io/${OWNER_LC}/mcm-backend:latest
+          fi
+
+          for i in {1..30}; do
+            curl -fs http://localhost:4000/health && break || sleep 2
+          done
+
+          # Verify the response shape
+          curl -fs http://localhost:4000/health | grep -q '"status":"ok"'
+          echo "Smoke test passed."
+
+      - name: Print container logs (always, for debugging)
+        if: always()
+        run: |
+          docker logs pg || true
+          docker logs be || true

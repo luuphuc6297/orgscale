@@ -1,14 +1,11 @@
-import { Injectable } from '@nestjs/common';
-import { InjectModel } from '@nestjs/sequelize';
 import { Op } from 'sequelize';
 import { Campaign } from './campaign.model';
 import { SendSimulator } from './send.simulator';
 import { AppError, ErrorCodes } from '../common/errors/app.error';
 
-@Injectable()
 export class CampaignsLifecycleService {
   constructor(
-    @InjectModel(Campaign) private readonly campaignModel: typeof Campaign,
+    private readonly campaignModel: typeof Campaign,
     private readonly simulator: SendSimulator,
   ) {}
 
@@ -17,7 +14,6 @@ export class CampaignsLifecycleService {
     if (Number.isNaN(when.getTime()) || when.getTime() <= Date.now()) {
       throw new AppError(ErrorCodes.VALIDATION, 'scheduledAt must be a future timestamp', 400);
     }
-    // Atomic: only updates a row that is currently draft
     const [count, rows] = await this.campaignModel.update(
       { status: 'scheduled', scheduledAt: when },
       { where: { id, createdBy: userId, status: 'draft' }, returning: true },

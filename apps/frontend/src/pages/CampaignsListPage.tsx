@@ -52,10 +52,10 @@ export default function CampaignsListPage() {
       )}
 
       {data && data.data.length > 0 && (
-        <div className="space-y-2">
+        <div className="flex flex-col gap-3">
           {data.data.map((c) => (
-            <Link key={c.id} to={`/campaigns/${c.id}`}>
-              <Card className="p-4 hover:bg-accent/40 transition-colors">
+            <Link key={c.id} to={`/campaigns/${c.id}`} className="block">
+              <Card className="p-4 hover:bg-accent/40 hover:border-accent transition-colors">
                 <div className="flex items-center justify-between gap-4">
                   <div className="min-w-0 flex-1">
                     <div className="font-medium truncate">{c.name}</div>

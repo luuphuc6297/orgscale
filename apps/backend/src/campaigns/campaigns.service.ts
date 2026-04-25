@@ -1,5 +1,3 @@
-import { Injectable } from '@nestjs/common';
-import { InjectConnection, InjectModel } from '@nestjs/sequelize';
 import { Sequelize } from 'sequelize';
 import { Campaign } from './campaign.model';
 import { CampaignRecipient } from './campaign-recipient.model';
@@ -7,27 +5,31 @@ import { Recipient } from '../recipients/recipient.model';
 import { RecipientsService } from '../recipients/recipients.service';
 import { StatsService } from './stats.service';
 import { AppError, ErrorCodes } from '../common/errors/app.error';
-import type { CreateCampaignDto } from './dto/create-campaign.dto';
-import type { UpdateCampaignDto } from './dto/update-campaign.dto';
-import type { ListCampaignsDto } from './dto/list-campaigns.dto';
+import type {
+  CreateCampaignInput,
+  UpdateCampaignInput,
+  ListCampaignsInput,
+} from './campaigns.schemas';
 
-@Injectable()
 export class CampaignsService {
   constructor(
-    @InjectModel(Campaign) private readonly campaignModel: typeof Campaign,
-    @InjectModel(CampaignRecipient) private readonly crModel: typeof CampaignRecipient,
-    @InjectConnection() private readonly sequelize: Sequelize,
+    private readonly campaignModel: typeof Campaign,
+    private readonly crModel: typeof CampaignRecipient,
+    private readonly sequelize: Sequelize,
     private readonly recipientsService: RecipientsService,
     private readonly stats: StatsService,
   ) {}
 
-  async list(userId: string, query: ListCampaignsDto) {
+  async list(userId: string, query: ListCampaignsInput) {
     const { page, limit, status } = query;
     const where: any = { createdBy: userId };
     if (status) where.status = status;
     const offset = (page - 1) * limit;
     const { rows, count } = await this.campaignModel.findAndCountAll({
-      where, offset, limit, order: [['updatedAt', 'DESC']],
+      where,
+      offset,
+      limit,
+      order: [['updatedAt', 'DESC']],
     });
     return { data: rows, total: count, page, limit };
   }
@@ -61,40 +63,51 @@ export class CampaignsService {
     };
   }
 
-  async create(userId: string, dto: CreateCampaignDto) {
+  async create(userId: string, input: CreateCampaignInput) {
     return this.sequelize.transaction(async (t) => {
-      const campaign = await this.campaignModel.create({
-        name: dto.name,
-        subject: dto.subject,
-        body: dto.body,
-        createdBy: userId,
-        status: 'draft',
-      } as any, { transaction: t });
+      const campaign = await this.campaignModel.create(
+        {
+          name: input.name,
+          subject: input.subject,
+          body: input.body,
+          createdBy: userId,
+          status: 'draft',
+        } as any,
+        { transaction: t },
+      );
 
-      const recipients = await this.recipientsService.ensureMany(dto.recipientEmails);
+      const recipients = await this.recipientsService.ensureMany(input.recipientEmails);
       await this.crModel.bulkCreate(
-        recipients.map((r) => ({ campaignId: campaign.id, recipientId: r.id, status: 'pending' })) as any[],
+        recipients.map((r) => ({
+          campaignId: campaign.id,
+          recipientId: r.id,
+          status: 'pending',
+        })) as any[],
         { transaction: t },
       );
       return campaign;
     });
   }
 
-  async update(userId: string, id: string, dto: UpdateCampaignDto) {
+  async update(userId: string, id: string, input: UpdateCampaignInput) {
     const campaign = await this.getOwned(userId, id);
     if (campaign.status !== 'draft') {
       throw new AppError(ErrorCodes.CONFLICT_STATE, 'Only draft campaigns can be edited', 409);
     }
     return this.sequelize.transaction(async (t) => {
-      if (dto.name !== undefined) campaign.name = dto.name;
-      if (dto.subject !== undefined) campaign.subject = dto.subject;
-      if (dto.body !== undefined) campaign.body = dto.body;
+      if (input.name !== undefined) campaign.name = input.name;
+      if (input.subject !== undefined) campaign.subject = input.subject;
+      if (input.body !== undefined) campaign.body = input.body;
       await campaign.save({ transaction: t });
-      if (dto.recipientEmails) {
+      if (input.recipientEmails) {
         await this.crModel.destroy({ where: { campaignId: id }, transaction: t });
-        const recipients = await this.recipientsService.ensureMany(dto.recipientEmails);
+        const recipients = await this.recipientsService.ensureMany(input.recipientEmails);
         await this.crModel.bulkCreate(
-          recipients.map((r) => ({ campaignId: id, recipientId: r.id, status: 'pending' })) as any[],
+          recipients.map((r) => ({
+            campaignId: id,
+            recipientId: r.id,
+            status: 'pending',
+          })) as any[],
           { transaction: t },
         );
       }

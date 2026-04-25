@@ -4,6 +4,16 @@ const { randomUUID } = require('crypto');
 
 module.exports = {
   async up(qi) {
+    // Idempotency guard: skip the entire seeder if demo data already exists.
+    // Lets `docker compose up` be re-run safely against a populated volume.
+    const [existing] = await qi.sequelize.query(
+      `SELECT 1 FROM users WHERE email = 'demo@example.com' LIMIT 1`,
+    );
+    if (existing.length > 0) {
+      console.log('[seed] demo data already present — skipping');
+      return;
+    }
+
     const userId = randomUUID();
     const passwordHash = await bcrypt.hash('password123', 10);
     await qi.bulkInsert('users', [

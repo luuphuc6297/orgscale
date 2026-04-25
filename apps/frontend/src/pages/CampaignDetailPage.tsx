@@ -29,6 +29,8 @@ export default function CampaignDetailPage() {
   const [scheduledFor, setScheduledFor] = useState('');
 
   const onSend = async () => {
+    const count = data?.recipients.length ?? 0;
+    if (!confirm(`Send this campaign to ${count} recipient${count === 1 ? '' : 's'}? This cannot be undone.`)) return;
     try {
       await send.mutateAsync();
       toast.success('Sending started.');

@@ -10,8 +10,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 
 export default function LoginPage() {
   const [mode, setMode] = useState<'login' | 'register'>('login');
-  const [email, setEmail] = useState('demo@example.com');
-  const [password, setPassword] = useState('password123');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [name, setName] = useState('Demo User');
   const navigate = useNavigate();
   const login = useLogin();
@@ -70,6 +70,11 @@ export default function LoginPage() {
             >
               {mode === 'login' ? "Don't have an account? Register" : 'Already have an account? Sign in'}
             </button>
+            {import.meta.env.DEV && (
+              <p className="text-xs text-muted-foreground text-center mt-2">
+                Demo creds: demo@example.com / password123
+              </p>
+            )}
           </form>
         </CardContent>
       </Card>

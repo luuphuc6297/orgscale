@@ -1,0 +1,72 @@
+name: Release
+
+# Triggered when a SemVer tag (v1.2.3) is pushed.
+# Generates a GitHub Release from the changelog between the previous tag and this one.
+# Does NOT publish images — that's handled by cd.yml on the same tag.
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g., v1.2.3)'
+        required: true
+
+permissions:
+  contents: write   # required to create the release
+
+jobs:
+  release:
+    name: GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history needed for changelog generation
+
+      - name: Determine tag
+        id: tag
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            echo "name=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          TAG="${{ steps.tag.outputs.name }}"
+          PREV="$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || echo '')"
+          {
+            echo "changelog<<__EOF__"
+            if [ -n "$PREV" ]; then
+              echo "## What's changed since ${PREV}"
+              echo
+              git log --pretty=format:'- %s (%h)' "${PREV}..${TAG}"
+            else
+              echo "## Initial release"
+              echo
+              git log --pretty=format:'- %s (%h)' "${TAG}"
+            fi
+            echo
+            echo
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: ${{ steps.tag.outputs.name }}
+          body: |
+            ${{ steps.changelog.outputs.changelog }}
+
+            ### Docker images (pushed by `cd.yml`)
+
+            ```bash
+            docker pull ghcr.io/${{ github.repository_owner }}/mcm-backend:${{ steps.tag.outputs.name }}
+            docker pull ghcr.io/${{ github.repository_owner }}/mcm-frontend:${{ steps.tag.outputs.name }}
+            ```
+          draft: false
+          prerelease: ${{ contains(steps.tag.outputs.name, '-') }}
