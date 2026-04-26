@@ -210,13 +210,40 @@ git push origin v1.0.0
 
 ## How I used Claude Code
 
-I drove this build with the Superpowers workflow: a brainstorming pass to disambiguate the spec, a single end-to-end implementation plan saved to `docs/superpowers/plans/`, then inline execution task-by-task. Notable points where the agent's discipline mattered:
+I drove this build with the Superpowers workflow — a brainstorming pass to disambiguate the spec, a single end-to-end implementation plan committed to `docs/superpowers/plans/`, then inline execution task-by-task with subagent dispatch for isolated steps and a final code-review pass. The full plan + audit trail lives in [`docs/superpowers/`](docs/superpowers/).
 
-* **State-machine race:** the agent insisted on the atomic `UPDATE … WHERE status='draft'` pattern over the read-then-write pattern I would have written by hand — and the integration test for concurrent sends passed on the first try.
-* **Stats convention:** when I asked for "open rate", the agent flagged the ambiguity (opened/total vs opened/sent) and locked in the marketing convention with a comment so the math is grep-able.
-* **Live polling:** the agent reached for TanStack Query's conditional `refetchInterval` (returning `false` once status flips) instead of a blanket interval — which means a quiet detail page makes zero network noise.
-* **Idempotent migrations:** the Postgres ENUM types are wrapped in `DO $$ BEGIN IF NOT EXISTS … $$` blocks so re-running the migration during local iteration doesn't blow up.
-* **Framework swap mid-flight:** I shipped the Express version first, then asked the agent to migrate the entire backend to NestJS while keeping the API contract byte-for-byte identical. It scoped out the rewrite as 8 N-tasks (scaffold → models → auth → recipients/campaigns modules → tests → cleanup) and held the frontend constant — the React app needed zero changes.
-* **Framework swap back to Express.** After the initial NestJS implementation shipped, an audit flagged the framework deviation from spec. The agent scoped the rewrite as 9 phases (deps swap → infra → models → modules → bootstrap → tests → CI), used the existing atomic `UPDATE … WHERE status = …` pattern unchanged, and ported all existing e2e tests plus added new coverage for recipients CRUD and DELETE on non-draft. The API contract held byte-for-byte — the React frontend did not need a single line changed beyond two unrelated polish fixes (remove hardcoded demo creds, confirm dialog on Send).
+### Tasks I delegated
 
-Implementation plan (the full task-by-task playbook) lives in `docs/superpowers/plans/2026-04-24-mini-campaign-manager.md`.
+* **Schema + migrations + seed** — generate Sequelize models, idempotent ENUM-creating migrations (the `DO $$ IF NOT EXISTS $$` pattern), and a seeder that's safe to re-run.
+* **Atomic state-machine implementation** — port the `UPDATE … WHERE status='draft' RETURNING` pattern across schedule/send transitions, plus the corresponding 409 INVALID_STATE_TRANSITION test cases.
+* **Express composition root** — translate the NestJS DI graph (services + controllers + scheduler + simulator) into manual `new` wiring in `src/app.ts`, no DI library, no `reflect-metadata` runtime reliance.
+* **TanStack Query hooks** — `useCampaignsList`, `useCampaignDetail` with conditional `refetchInterval` for live polling on `sending` campaigns.
+* **Audit + remediation** — three-lens scan (system design, clean code, solution architecture) producing a prioritised gap list, then an 11-fix remediation pass (rate limit, correlation ID, restart resilience, drain timeout, healthcheck, …).
+* **CI/CD** — three GitHub Actions workflows (lint+typecheck+test+build, Docker image push to GHCR with layer cache, semver tag → release).
+* **README + walkthrough** — including the structure of this section.
+
+### 2–3 example prompts (verbatim or near-verbatim)
+
+> *"Audit codebase tại `/Users/luuphuc/Projects/orgscale/mini-campaign-manager` so với đề bài S5 Tech Full-Stack Code Challenge. Đánh giá % completion, gap list, recommendations. Trích dẫn file:line cho mọi claim. Không bịa."* — produced the initial 90% scorecard and unblocked the rewrite plan.
+
+> *"Rewrite the NestJS backend to plain Express + TypeScript while preserving API contract byte-for-byte. Composition root pattern (zero DI library). zod for validation + env. Sequential execution. Bundle audit fixes (rate limit, demo creds, ESLint+CI, Send confirm)."* — became the 9-phase implementation plan; 40+ bite-sized tasks with explicit file paths and verification steps.
+
+> *"Bug #1 from the code review: SendSimulator doesn't drain in-flight tasks on shutdown — log spam on SIGTERM. Apply 2 surgical fixes: track pending promises in `send.simulator.ts`, expose `drain()`; in `main.ts` await drain after `server.close()` and before `sequelize.close()`."* — the agent landed both edits in a single subagent dispatch.
+
+### Where Claude Code was wrong or needed correction
+
+* **Initial framework choice.** Claude initially picked NestJS for the DI/validation/scheduler ergonomics. The choice was defensible but spec said *"Node.js with Express"*. I caught this in the audit and asked for a behaviour-preserving rewrite — Claude planned and executed the 9-phase swap without breaking any of the 14 e2e tests.
+* **Type-safety shortcuts.** The first cut of `excludePassword(user)` cast `User` directly to `Record<string, unknown>` — TypeScript rejected it (`error TS2352: convert to unknown first`). Claude fixed it as `as unknown as Record<…>` only after the Docker build surfaced the error; I had to nudge the agent toward the `unknown` intermediate cast rather than just `as any`.
+* **CD smoke test flakiness.** Claude's first CD pipeline tried to spin a real Postgres + backend container in the smoke job and curl `/health`. It was flaky (cold-start + migration race in CI). I pushed back and we replaced it with a `verify-images` job that just `docker pull`s + `docker inspect`s — narrower scope, deterministic, still valuable.
+* **Yarn workspace duplicate Vite types.** The agent's frontend `build` script kept `tsc -b && vite build`. In CI that triggered the well-known yarn-1 hoisting issue (two `vite` copies, two `Plugin<any>` types). Claude only got the right fix (drop `tsc -b` from `build`, move type-checking into a separate `typecheck` script) after I fed back the actual error.
+* **Seeder idempotency.** First seeder unconditionally inserted `demo@example.com` and crashed loudly on container restart. We added a `SELECT 1 FROM users WHERE email='demo@example.com'` guard at the top — the kind of safety check Claude doesn't reach for unprompted.
+
+### What I did NOT let Claude Code do, and why
+
+* **Pick the auth storage mechanism.** Claude was happy to leave the JWT in `localStorage` via Zustand's `persist` middleware. That's XSS-exposed; in production it should be an httpOnly cookie. I held that decision because it spans backend (set-cookie + CORS credentials) *and* frontend (no axios bearer header) *and* deployment (cookie domain), and getting the security model right is a human call. Documented as M1 in [`docs/superpowers/reviews/2026-04-25-three-lens-audit.md`](docs/superpowers/reviews/2026-04-25-three-lens-audit.md).
+* **Decide what counts as "production-ready".** When the audit produced 7 architectural concerns, I — not the agent — decided which fall in Sprint 0 (must-fix), Sprint 1 (production hardening), and Sprint 2 (multi-instance scale, requires new infra). The agent will happily implement *anything*; choosing the boundary of "good enough for a code challenge" vs "good enough for revenue" is mine.
+* **Add new dependencies without a justification I'd accept.** The agent suggested `tsyringe` for DI, BullMQ for the queue, Redis for distributed scheduler lock, Prometheus for metrics. Each was reasonable; I rejected all of them because they bring infra weight that exceeds the spec ask. The audit doc records *why* they're not in scope.
+* **Write this "How I used Claude Code" section unsupervised.** It's a self-report — letting the agent draft it without correction would be circular. I wrote/edited the prose; the agent helped with structure and provided notes from its own task history.
+* **Touch destructive operations without confirmation.** `git reset --hard`, `rm -rf` outside scratch dirs, force-push, dropping a database — the agent has tools to do all of these and was instructed not to. Where it did delete files (e.g., wiping NestJS sources before rewrite), I confirmed each step in chat first.
+
+Implementation plan + spec + reviews are committed under [`docs/superpowers/`](docs/superpowers/) for full audit trail.
